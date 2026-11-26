@@ -115,6 +115,43 @@ export default function WorkChainHome() {
     }
   };
 
+  useEffect(() => {
+    if (typeof window === "undefined" || !(window as any).ethereum) return;
+    const eth = (window as any).ethereum;
+
+    const handleAccountsChanged = (accounts: string[]) => {
+      if (accounts.length > 0) {
+        const nextAcc = accounts[0];
+        setAccount(nextAcc);
+        const provider = new ethers.BrowserProvider(eth);
+        loadBalance(nextAcc, provider);
+        fetchContractDetails(contractIdInput, provider);
+      } else {
+        setAccount("");
+        setBalance("0");
+      }
+    };
+
+    eth.on("accountsChanged", handleAccountsChanged);
+    return () => {
+      eth.removeListener("accountsChanged", handleAccountsChanged);
+    };
+  }, [contractIdInput]);
+
+  // 버튼으로 메타마스크 계정 선택창 다시 띄우기
+  const switchWallet = async () => {
+    if (typeof window === "undefined" || !(window as any).ethereum) return;
+    try {
+      const eth = (window as any).ethereum;
+      await eth.request({
+        method: "wallet_requestPermissions",
+        params: [{ eth_accounts: {} }],
+      });
+      await connectWallet();
+    } catch (err: any) {
+      console.error("계정 전환 취소:", err);
+    }
+  };
   // KRWT 잔고 조회
   const loadBalance = async (userAddr: string, provider: any) => {
     try {
@@ -421,11 +458,19 @@ export default function WorkChainHome() {
             <Sparkles className="w-4 h-4" /> AI 계약서 진단기
           </button>
           {account ? (
-            <div className="text-right">
-              <span className="text-xs bg-blue-100 text-blue-800 px-3 py-1 rounded-full font-mono">
-                {account.slice(0, 6)}...{account.slice(-4)}
-              </span>
-              <p className="text-xs text-slate-600 mt-1 font-semibold">{Number(balance).toLocaleString()} KRWT</p>
+            <div className="flex items-center gap-2">
+              <div className="text-right">
+                <span className="text-xs bg-blue-100 text-blue-800 px-3 py-1 rounded-full font-mono">
+                  {account.slice(0, 6)}...{account.slice(-4)}
+                </span>
+                <p className="text-xs text-slate-600 mt-1 font-semibold">{Number(balance).toLocaleString()} KRWT</p>
+              </div>
+              <button
+                onClick={switchWallet}
+                className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-2.5 py-2 rounded-lg font-semibold"
+              >
+                계정 전환
+              </button>
             </div>
           ) : (
             <button onClick={connectWallet} className="bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-4 py-2 rounded-lg shadow">
