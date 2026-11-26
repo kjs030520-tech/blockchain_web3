@@ -1,8 +1,10 @@
 [
-  "function createAndFundContract(address _worker, bytes32 _contractHash, string _jobTitle, uint256 _hourlyWage, uint256 _expectedHours) returns (uint256)",
+  "function createAndFundContract(address _worker, bytes32 _contractHash, string _jobTitle, uint256 _hourlyWage, uint256 _expectedHours, bytes _aiSignature) returns (uint256)",
+  "function aiSigner() view returns (address)",
+  "function registeredHashes(bytes32) view returns (bool)",
   "function recordVerifiedHours(uint256 _contractId, uint256 _minutesToAdd)",
-  "function settleWage(uint256 _contractId)",
+  "function settleWage(uint256 _contractId, uint256 _totalMinutes, bytes _serverSignature)",
   "function getWorkerHistory(address _worker) view returns (tuple(uint256 contractId, address employer, string jobTitle, uint256 totalWorkedHours, uint256 totalWorkedMinutes, uint256 settledWage, uint256 completedDate, bytes32 contractHash)[])",
-  "function getContract(uint256 _contractId) view returns (tuple(uint256 contractId, address employer, address worker, bytes32 contractHash, string jobTitle, uint256 hourlyWage, uint256 totalEscrowFunded, uint256 accumulatedMinutes, uint256 settledAmount, uint256 createdAt, uint256 completedAt, bool isHolidayPayEligible, uint8 status))",
+  "function getContract(uint256 _contractId) view returns (tuple(address employer, uint40 createdAt, uint40 completedAt, bool isHolidayPayEligible, uint8 status, address worker, uint64 contractId, uint32 accumulatedMinutes, uint96 hourlyWage, uint96 totalEscrowFunded, uint96 settledAmount, bytes32 contractHash, string jobTitle))",
   "function nextContractId() view returns (uint256)"
-]   
+]

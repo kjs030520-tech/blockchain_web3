@@ -1,76 +1,174 @@
 import { NextRequest, NextResponse } from "next/server";
+import { ethers } from "ethers";
+import https from "https";
 
-const SYSTEM_PROMPT = `
-당신은 대한민국 고용노동부 근로기준법 전문 공인노무사 AI입니다.
-사용자가 제공한 근로계약서 텍스트 또는 조항을 분석하여, 불공정 독소조항과 법적 위반 사항을 정밀 진단하십시오.
-반드시 마크다운 없이 순수 JSON 형식으로만 응답하십시오:
-{
-  "riskScore": 85,
-  "riskLevel": "위험" | "경고" | "안전",
-  "summary": "총 2건의 근로기준법 위반 독소조항 발견",
-  "toxicClauses": [
-    {
-      "detectedText": "위반 의심 원문 조항",
-      "lawReference": "근로기준법 제20조 (위약 예정의 금지)",
-      "explanation": "해당 조항이 왜 불법이고 무효인지 해설",
-      "recommendation": "공정하고 합법적인 표준 조항으로의 수정 제안 문구"
-    }
-  ]
+function callGeminiApi(apiKey: string, payload: object): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(payload);
+    const req = https.request(
+      {
+        hostname: "generativelanguage.googleapis.com",
+        path: `/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`,
+        method: "POST",
+        family: 4, // IPv6 지연/드롭 방지 (IPv4 강제)
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+        },
+        timeout: 30000, // 30초 타임아웃
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (chunk) => {
+          data += chunk;
+        });
+        res.on("end", () => {
+          try {
+            const parsed = JSON.parse(data);
+            if (res.statusCode && res.statusCode >= 400) {
+              reject(new Error(`Gemini HTTP ${res.statusCode}: ${data}`));
+            } else {
+              resolve(parsed);
+            }
+          } catch (e) {
+            reject(new Error(`JSON 파싱 실패: ${data.slice(0, 200)}`));
+          }
+        });
+      }
+    );
+
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("Gemini API 응답 시간 초과 (30초)"));
+    });
+    req.on("error", (err) => reject(err));
+    req.write(body);
+    req.end();
+  });
 }
-`;
 
 export async function POST(req: NextRequest) {
   try {
-    const { contractText } = await req.json();
-    if (!contractText?.trim()) {
-      return NextResponse.json({ error: "계약서 내용을 입력해 주세요." }, { status: 400 });
+    const formData = await req.formData();
+    const file = formData.get("file") as File | null;
+    const employerAddress = formData.get("employerAddress") as string | null;
+
+    if (!file || file.type !== "application/pdf") {
+      return NextResponse.json(
+        { error: "PDF 파일만 업로드할 수 있습니다." },
+        { status: 400 }
+      );
     }
 
-    const apiKey = process.env.OPENAI_API_KEY;
+    if (!employerAddress || !ethers.isAddress(employerAddress)) {
+      return NextResponse.json(
+        { error: "유효한 고용주 지갑 주소가 필요합니다." },
+        { status: 400 }
+      );
+    }
 
-    // OpenAI 키가 있을 때 실제 GPT-4o 호출
-    if (apiKey && apiKey.startsWith("sk-")) {
-      const response = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: "gpt-4o-mini",
-          messages: [
-            { role: "system", content: SYSTEM_PROMPT },
-            { role: "user", content: contractText },
+    const geminiKey = process.env.GEMINI_API_KEY;
+    const signerPrivateKey = process.env.AI_SIGNER_PRIVATE_KEY;
+    if (!geminiKey || !signerPrivateKey) {
+      return NextResponse.json(
+        { error: "서버 환경변수(GEMINI_API_KEY 또는 AI_SIGNER_PRIVATE_KEY)가 누락되었습니다." },
+        { status: 500 }
+      );
+    }
+
+    // 1. PDF 원본 바이너리에서 SHA-256 해시(bytes32) 추출
+    const arrayBuffer = await file.arrayBuffer();
+    const pdfBuffer = Buffer.from(arrayBuffer);
+    const contractHash = ethers.sha256(new Uint8Array(pdfBuffer));
+    const base64Pdf = pdfBuffer.toString("base64");
+
+    // 2. Gemini API 호출 (HTTP/1.1 + IPv4)
+    const geminiData = await callGeminiApi(geminiKey, {
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              inline_data: {
+                mime_type: "application/pdf",
+                data: base64Pdf,
+              },
+            },
+            {
+              text: `당신은 대한민국 근로기준법 전문 공인노무사 AI입니다. 첨부된 PDF 근로계약서를 분석해 다음 기준으로 적법성을 판별하세요.
+1) 최저임금 준수 여부 (시급 기준)
+2) 근로기준법 제20조(위약 예정 금지: 지각·결근 시 과도한 벌금·손해배상 공제 조항) 위반 여부
+3) 근로기준법 제55조(주 15시간 이상 근로 시 주휴수당 지급 의무) 배제·포기 조항 여부
+4) 계약서에 명시된 직무명(jobTitle), 시급(hourlyWage, 원 단위 정수), 예상 총 근로시간(expectedHours, 시간 단위 정수)을 추출하세요.
+위반 조항이 하나라도 있거나 시급·근로시간이 불명확하면 isCompliant를 false로 반환하세요.`,
+            },
           ],
-          response_format: { type: "json_object" },
-          temperature: 0.2,
-        }),
+        },
+      ],
+      generationConfig: {
+        temperature: 0.1,
+        thinkingConfig: { thinkingLevel: "MINIMAL" },
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "OBJECT",
+          properties: {
+            isCompliant: { type: "BOOLEAN" },
+            jobTitle: { type: "STRING" },
+            hourlyWage: { type: "INTEGER" },
+            expectedHours: { type: "INTEGER" },
+            violations: {
+              type: "ARRAY",
+              items: { type: "STRING" },
+            },
+            summary: { type: "STRING" },
+          },
+          required: [
+            "isCompliant",
+            "jobTitle",
+            "hourlyWage",
+            "expectedHours",
+            "violations",
+            "summary",
+          ],
+        },
+      },
+    });
+
+    const rawText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+    const analysis = JSON.parse(rawText);
+
+    // 3. 규정 위반 시 서명 발급 거절
+    if (!analysis.isCompliant || analysis.hourlyWage <= 0 || analysis.expectedHours <= 0) {
+      return NextResponse.json({
+        approved: false,
+        contractHash,
+        analysis,
       });
-      const data = await response.json();
-      return NextResponse.json(JSON.parse(data.choices[0].message.content));
     }
 
-    // OpenAI 키가 없어도 발표 시연이 바로 가능한 스마트 Fallback 모의 진단
+    // 4. 규정 통과 시에만 LaborEscrow.sol 규격으로 ECDSA 전자서명 생성
+    const hourlyWageWei = ethers.parseUnits(String(analysis.hourlyWage), 18);
+    const expectedHoursBigInt = BigInt(analysis.expectedHours);
+
+    const payloadHash = ethers.solidityPackedKeccak256(
+      ["bytes32", "address", "uint256", "uint256"],
+      [contractHash, employerAddress, hourlyWageWei, expectedHoursBigInt]
+    );
+
+    const wallet = new ethers.Wallet(signerPrivateKey);
+    const signature = await wallet.signMessage(ethers.getBytes(payloadHash));
+
     return NextResponse.json({
-      riskScore: 85,
-      riskLevel: "위험",
-      summary: "근로기준법 제20조 및 제55조 위반 독소조항 2건 검출",
-      toxicClauses: [
-        {
-          detectedText: "퇴사 30일 전에 미리 통보하지 않고 퇴사할 경우, 당월 급여의 50%를 위약금 명목으로 공제한다.",
-          lawReference: "근로기준법 제20조 (위약 예정의 금지)",
-          explanation: "사용자는 근로계약 불이행에 대한 위약금이나 손해배상액을 예정하는 계약을 체결하지 못합니다. 실제 손해액 입증 없는 일방적 급여 공제 약정은 법적으로 원천 무효입니다.",
-          recommendation: "급여 임의 삭감 조항을 전면 삭제하고 표준 퇴사 절차로 대체해야 합니다."
-        },
-        {
-          detectedText: "주 15시간 이상 근무하더라도 주휴수당은 시급에 포함되어 별도 지급하지 않는다.",
-          lawReference: "근로기준법 제55조 (휴일 및 주휴수당)",
-          explanation: "주 15시간 이상 개근한 근로자에게는 유급휴일(주휴수당)을 반드시 부여해야 합니다. 단순 구두나 포괄 시급 약정은 무효이며 임금 체불에 해당합니다.",
-          recommendation: "기본 시급과 주휴수당을 분리하여 명시하고, 주 15시간 이상 개근 시 약정 시급에 비례한 주휴수당을 정산해야 합니다."
-        }
-      ]
+      approved: true,
+      contractHash,
+      signature,
+      analysis,
     });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    console.error("Verify contract error:", error);
+    return NextResponse.json(
+      { error: error?.message || "서버 내부 오류가 발생했습니다." },
+      { status: 500 }
+    );
   }
 }

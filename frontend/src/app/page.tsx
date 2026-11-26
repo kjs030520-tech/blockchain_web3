@@ -13,7 +13,8 @@ import {
   TrendingUp, 
   Sparkles, 
   X, 
-  AlertTriangle 
+  AlertTriangle,
+  Upload
 } from "lucide-react";
 
 // 스마트 컨트랙트 ABI 인라인 선언
@@ -28,11 +29,11 @@ const KRWT_ABI = [
 ];
 
 const ESCROW_ABI = [
-  "function createAndFundContract(address _worker, bytes32 _contractHash, string _jobTitle, uint256 _hourlyWage, uint256 _expectedHours) returns (uint256)",
+  "function createAndFundContract(address _worker, bytes32 _contractHash, string _jobTitle, uint256 _hourlyWage, uint256 _expectedHours, bytes _aiSignature) returns (uint256)",
   "function recordVerifiedHours(uint256 _contractId, uint256 _minutesToAdd)",
-  "function settleWage(uint256 _contractId)",
+  "function settleWage(uint256 _contractId, uint256 _totalMinutes, bytes _serverSignature)",
   "function getWorkerHistory(address _worker) view returns (tuple(uint256 contractId, address employer, string jobTitle, uint256 totalWorkedHours, uint256 totalWorkedMinutes, uint256 settledWage, uint256 completedDate, bytes32 contractHash)[])",
-  "function getContract(uint256 _contractId) view returns (tuple(uint256 contractId, address employer, address worker, bytes32 contractHash, string jobTitle, uint256 hourlyWage, uint256 totalEscrowFunded, uint256 accumulatedMinutes, uint256 settledAmount, uint256 createdAt, uint256 completedAt, bool isHolidayPayEligible, uint8 status))",
+  "function getContract(uint256 _contractId) view returns (tuple(address employer, uint40 createdAt, uint40 completedAt, bool isHolidayPayEligible, uint8 status, address worker, uint64 contractId, uint32 accumulatedMinutes, uint96 hourlyWage, uint96 totalEscrowFunded, uint96 settledAmount, bytes32 contractHash, string jobTitle))",
   "function nextContractId() view returns (uint256)"
 ];
 
@@ -65,9 +66,25 @@ export default function WorkChainHome() {
   const [expectedHours, setExpectedHours] = useState("16");
   const [generatedOtp, setGeneratedOtp] = useState<string | null>(null);
   const [contractIdInput, setContractIdInput] = useState("1");
+  const [pdfFileName, setPdfFileName] = useState("");
+  const [isVerifyingPdf, setIsVerifyingPdf] = useState(false);
+  const [verifiedContract, setVerifiedContract] = useState<{
+    approved: boolean;
+    contractHash: string;
+    signature?: string;
+    analysis: {
+      isCompliant: boolean;
+      jobTitle: string;
+      hourlyWage: number;
+      expectedHours: number;
+      violations: string[];
+      summary: string;
+    };
+  } | null>(null);
 
   // 실시간 계약 상태 정보
   const [activeContractInfo, setActiveContractInfo] = useState<any>(null);
+  const [offchainMinutes, setOffchainMinutes] = useState<number>(0);
 
   // 근로자 상태
   const [inputOtp, setInputOtp] = useState("");
@@ -112,29 +129,36 @@ export default function WorkChainHome() {
   // 진행 중인 계약 실시간 누적 근무 시간 조회
   const fetchContractDetails = async (cId: string, currentProvider?: any) => {
     try {
+      // 1) 오프체인 누적 근무시간 조회
+      const logRes = await fetch(`/api/work-logs?contractId=${cId}`);
+      const logData = logRes.ok ? await logRes.json() : { totalMinutes: 0 };
+      const currentOffchain = Number(logData.totalMinutes || 0);
+      setOffchainMinutes(currentOffchain);
+
       if (typeof window === "undefined" || !(window as any).ethereum) return;
       const provider = currentProvider || new ethers.BrowserProvider((window as any).ethereum);
       const escrowContract = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, provider);
       const c = await escrowContract.getContract(cId);
-      
+
       // ES2020 호환 및 안전한 BigInt 변환
       if (c && Number(c.contractId) > 0) {
+        const statusNum = Number(c.status);
         setActiveContractInfo({
           contractId: Number(c.contractId),
           jobTitle: c.jobTitle,
           hourlyWage: c.hourlyWage,
-          accumulatedMinutes: Number(c.accumulatedMinutes),
-          isHolidayPayEligible: c.isHolidayPayEligible,
-          status: Number(c.status),
+          // 정산 전(1)이면 오프체인 누적 분, 정산 완료(2)면 온체인 확정 분 표시
+          accumulatedMinutes: statusNum === 2 ? Number(c.accumulatedMinutes) : currentOffchain,
+          isHolidayPayEligible: statusNum === 2 ? c.isHolidayPayEligible : currentOffchain >= 900,
+          status: statusNum,
           employer: c.employer,
-          worker: c.worker
+          worker: c.worker,
         });
       }
     } catch (e) {
       console.error("계약 정보 조회 실패:", e);
     }
   };
-
   // 무료 테스트 원화 토큰 받기 (Faucet)
   const handleFaucet = async () => {
     if (!account) return alert("지갑을 먼저 연결하세요.");
@@ -154,11 +178,65 @@ export default function WorkChainHome() {
       setLoading(false);
     }
   };
+  // 157행(handleFaucet 닫는 괄호) 아래에 추가
+  // 0. PDF 근로계약서 AI 검증 및 전자서명 발급
+  const handleVerifyPdf = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!account) {
+      alert("지갑을 먼저 연결해 주세요. (서명에 고용주 지갑 주소가 필요합니다)");
+      e.target.value = "";
+      return;
+    }
+
+    setPdfFileName(file.name);
+    setIsVerifyingPdf(true);
+    setVerifiedContract(null);
+    setStatusMsg("AI가 PDF 근로계약서의 근로기준법 준수 여부를 분석 중입니다...");
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("employerAddress", account);
+
+      const res = await fetch("/api/verify-contract", {
+        method: "POST",
+        body: formData,
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "PDF 검증 요청 실패");
+      }
+
+      setVerifiedContract(data);
+
+      if (data.approved) {
+        // AI가 추출한 직무명, 시급, 예상 근무시간을 폼에 자동 반영
+        setJobTitle(data.analysis.jobTitle);
+        setHourlyWage(String(data.analysis.hourlyWage));
+        setExpectedHours(String(data.analysis.expectedHours));
+        setStatusMsg("✓ AI 근로기준법 검증 통과! 전자서명이 발급되었습니다.");
+      } else {
+        setStatusMsg("⚠️ 근로기준법 위반 또는 불명확한 조항이 있어 온체인 등록이 차단되었습니다.");
+      }
+    } catch (err: any) {
+      alert("PDF 분석 오류: " + err.message);
+      setStatusMsg("PDF 분석 실패: " + err.message);
+    } finally {
+      setIsVerifyingPdf(false);
+    }
+  };
 
   // 1. 고용주: 계약 등록 및 에스크로 예치
+  // 1. 고용주: AI 검증 완료된 계약 등록 및 에스크로 예치
   const handleCreateContract = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!account) return alert("지갑을 연결하세요.");
+    if (!verifiedContract?.approved || !verifiedContract.signature) {
+      return alert("먼저 적법한 PDF 근로계약서를 업로드해 AI 검증을 통과해야 합니다.");
+    }
+
     setLoading(true);
     setStatusMsg("에스크로 계약 승인 및 토큰 예치 진행 중...");
     try {
@@ -175,13 +253,13 @@ export default function WorkChainHome() {
       const approveTx = await tokenContract.approve(ESCROW_ADDR, escrowTotal);
       await approveTx.wait();
 
-      const mockContractHash = ethers.keccak256(ethers.toUtf8Bytes(jobTitle + Date.now()));
       const tx = await escrowContract.createAndFundContract(
         workerAddr,
-        mockContractHash,
+        verifiedContract.contractHash,
         jobTitle,
         wageWei,
-        expectedHours
+        expectedHours,
+        verifiedContract.signature
       );
       await tx.wait();
 
@@ -196,51 +274,77 @@ export default function WorkChainHome() {
   };
 
   // 2. 고용주: 6자리 OTP 출퇴근 번호 발급
-  const handleGenerateOtp = () => {
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    setGeneratedOtp(code);
-    setStatusMsg(`✓ 매장용 6자리 인증번호 [${code}] 생성됨 (알바생에게 알려주세요)`);
+  // 2. 고용주: 서버에서 1회용 6자리 OTP 발급
+  const handleGenerateOtp = async () => {
+    try {
+      const res = await fetch("/api/work-logs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "generate_otp", contractId: contractIdInput }),
+      });
+      const data = await res.json();
+      setGeneratedOtp(data.code);
+      setStatusMsg(`✓ 1회용 인증번호 [${data.code}] 생성됨 (사용 즉시 폐기)`);
+    } catch (err: any) {
+      alert("OTP 발급 실패: " + err.message);
+    }
   };
 
-  // 3. 근로자: 6자리 OTP 입력으로 4시간(240분) 출퇴근 인증 누적
+  // 3. 근로자: 오프체인 1회용 OTP 인증 (가스비 0원)
   const handleVerifyOtp = async () => {
-    if (!account) return alert("지갑을 연결하세요.");
     if (!inputOtp || inputOtp.length !== 6) return alert("6자리 번호를 정확히 입력하세요.");
     setLoading(true);
-    setStatusMsg("OTP 인증 확인 및 온체인 근무 시간(4시간) 기록 중...");
     try {
-      const provider = new ethers.BrowserProvider((window as any).ethereum);
-      const signer = await provider.getSigner();
-      const escrowContract = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, signer);
+      const res = await fetch("/api/work-logs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "verify_otp",
+          contractId: contractIdInput,
+          otpCode: inputOtp,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
 
-      const tx = await escrowContract.recordVerifiedHours(contractIdInput, 240);
-      await tx.wait();
-
-      setStatusMsg("✓ OTP 출퇴근 인증 성공! (온체인에 4시간(240분) 누적 반영 완료)");
+      setOffchainMinutes(data.totalMinutes);
       setInputOtp("");
-      fetchContractDetails(contractIdInput, provider);
+      setStatusMsg(`✓ 출퇴근 인증 완료! (가스비 0원 · 누적 ${data.totalMinutes}분)`);
+      fetchContractDetails(contractIdInput);
     } catch (err: any) {
-      alert("출퇴근 기록 실패: " + (err.reason || err.message));
-      setStatusMsg("인증 실패: " + (err.reason || err.message));
+      alert(err.message);
+      setStatusMsg("인증 실패: " + err.message);
     } finally {
       setLoading(false);
     }
   };
 
-  // 4. 고용주/근로자: 최종 급여 자동 정산 실행
+  // 4. 최종 급여 일괄 정산 (서버 서명 발급 -> 온체인 1회 실행)
   const handleSettleWage = async () => {
     if (!account) return alert("지갑을 연결하세요.");
     setLoading(true);
-    setStatusMsg("스마트 컨트랙트 주휴수당 계산 및 자동 정산 실행 중...");
+    setStatusMsg("서버 정산 서명 발급 및 온체인 일괄 정산 실행 중...");
     try {
+      const prepRes = await fetch("/api/work-logs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "prepare_settle", contractId: contractIdInput }),
+      });
+      const prepData = await prepRes.json();
+      if (!prepRes.ok) throw new Error(prepData.error);
+
       const provider = new ethers.BrowserProvider((window as any).ethereum);
       const signer = await provider.getSigner();
       const escrowContract = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, signer);
 
-      const tx = await escrowContract.settleWage(contractIdInput);
+      const tx = await escrowContract.settleWage(
+        contractIdInput,
+        prepData.totalMinutes,
+        prepData.signature
+      );
       await tx.wait();
 
-      setStatusMsg("✓ 정산 완료! 근로자에게 급여가 즉시 입금되었으며 잔여금은 환급되었습니다.");
+      setStatusMsg("✓ 일괄 정산 완료! 급여 이체 및 잔여금 환급이 끝났습니다.");
       loadBalance(account, provider);
       fetchContractDetails(contractIdInput, provider);
       handleFetchHistory();
@@ -440,6 +544,48 @@ export default function WorkChainHome() {
               <FileText className="text-blue-600" /> 신규 근로계약 등록 & 에스크로 예치
             </h2>
             <form onSubmit={handleCreateContract} className="space-y-4 text-sm">
+              {/* PDF 업로드 & AI 검증 영역 */}
+              <div className="p-3.5 bg-slate-50 border-2 border-dashed border-slate-300 rounded-xl">
+                <label className="block text-xs font-bold text-slate-700 mb-2">
+                  1단계: PDF 근로계약서 AI 규정 검증 (필수)
+                </label>
+                <label className="flex items-center justify-center gap-2 w-full py-2.5 px-3 bg-white border border-slate-300 rounded-lg cursor-pointer hover:bg-slate-100 transition text-xs font-semibold text-slate-700">
+                  <Upload className="w-4 h-4 text-blue-600" />
+                  <span>{isVerifyingPdf ? "AI가 PDF를 분석 중입니다..." : pdfFileName || "PDF 계약서 파일 선택"}</span>
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    onChange={handleVerifyPdf}
+                    disabled={isVerifyingPdf}
+                    className="hidden"
+                  />
+                </label>
+
+                {verifiedContract && (
+                  <div
+                    className={`mt-3 p-3 rounded-lg text-xs border ${
+                      verifiedContract.approved
+                        ? "bg-emerald-50 border-emerald-200 text-emerald-900"
+                        : "bg-red-50 border-red-200 text-red-900"
+                    }`}
+                  >
+                    <p className="font-bold">
+                      {verifiedContract.approved
+                        ? "✓ 근로기준법 준수 확인 (전자서명 발급 완료)"
+                        : "⛔ 근로기준법 위반 감지 (블록체인 등록 차단)"}
+                    </p>
+                    <p className="mt-1">{verifiedContract.analysis.summary}</p>
+                    {verifiedContract.analysis.violations?.length > 0 && (
+                      <ul className="mt-1.5 list-disc list-inside space-y-0.5 text-red-700">
+                        {verifiedContract.analysis.violations.map((v, i) => (
+                          <li key={i}>{v}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+
               <div>
                 <label className="block text-slate-600 mb-1">근로자 지갑 주소</label>
                 <input
@@ -452,12 +598,13 @@ export default function WorkChainHome() {
                 />
               </div>
               <div>
-                <label className="block text-slate-600 mb-1">직무명</label>
+                <label className="block text-slate-600 mb-1">직무명 (AI 자동 추출)</label>
                 <input
                   type="text"
                   value={jobTitle}
+                  readOnly={!!verifiedContract?.approved}
                   onChange={(e) => setJobTitle(e.target.value)}
-                  className="w-full p-2.5 border rounded-lg"
+                  className="w-full p-2.5 border rounded-lg bg-slate-50"
                   required
                 />
               </div>
@@ -467,8 +614,9 @@ export default function WorkChainHome() {
                   <input
                     type="number"
                     value={hourlyWage}
+                    readOnly={!!verifiedContract?.approved}
                     onChange={(e) => setHourlyWage(e.target.value)}
-                    className="w-full p-2.5 border rounded-lg font-semibold"
+                    className="w-full p-2.5 border rounded-lg font-semibold bg-slate-50"
                     required
                   />
                 </div>
@@ -477,8 +625,9 @@ export default function WorkChainHome() {
                   <input
                     type="number"
                     value={expectedHours}
+                    readOnly={!!verifiedContract?.approved}
                     onChange={(e) => setExpectedHours(e.target.value)}
-                    className="w-full p-2.5 border rounded-lg font-semibold"
+                    className="w-full p-2.5 border rounded-lg font-semibold bg-slate-50"
                     required
                   />
                 </div>
@@ -488,10 +637,18 @@ export default function WorkChainHome() {
               </div>
               <button
                 type="submit"
-                disabled={loading}
-                className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg shadow transition"
+                disabled={loading || !verifiedContract?.approved}
+                className={`w-full py-3 font-bold rounded-lg shadow transition ${
+                  verifiedContract?.approved
+                    ? "bg-blue-600 hover:bg-blue-700 text-white"
+                    : "bg-slate-300 text-slate-500 cursor-not-allowed"
+                }`}
               >
-                {loading ? "처리 중..." : "에스크로 예치 및 계약 체결"}
+                {loading
+                  ? "처리 중..."
+                  : verifiedContract?.approved
+                  ? "에스크로 예치 및 계약 체결"
+                  : "PDF 검증 통과 후 등록 가능"}
               </button>
             </form>
           </div>
@@ -578,6 +735,13 @@ export default function WorkChainHome() {
                 className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg shadow text-sm transition"
               >
                 출근/근무 확인 인증 (4시간 누적)
+              </button>
+              <button
+                onClick={handleSettleWage}
+                disabled={loading}
+                className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg shadow text-sm transition"
+              >
+                💰 급여 직접 정산 청구 (고용주 미정산 시)
               </button>
             </div>
           </div>
