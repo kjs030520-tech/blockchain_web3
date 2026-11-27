@@ -18,13 +18,14 @@ export async function GET(req: NextRequest) {
 
     const { data } = await supabase
       .from("workchain_logs")
-      .select("total_minutes")
+      .select("total_minutes, active_check_in_at")
       .eq("contract_id", contractId)
       .maybeSingle();
 
     return NextResponse.json({
       contractId,
       totalMinutes: data?.total_minutes || 0,
+      activeCheckInAt: data?.active_check_in_at || null,
     });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
@@ -34,16 +35,16 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { action, contractId, otpCode } = body;
+    const { action, contractId } = body;
     const cId = String(contractId || "1");
     const supabase = getSupabase();
 
     // 1. 고용주: 1회용 6자리 OTP 발급 (유효시간 3분)
-    if (action === "generate_otp") {
+    if (action === "issue_otp") {
       const code = Math.floor(100000 + Math.random() * 900000).toString();
-      const expiresAt = Date.now() + 3 * 60 * 1000;
+      const expiresAt = new Date(Date.now() + 180 * 1000).toISOString();
 
-      const { error } = await supabase.from("workchain_otps").upsert({
+      const { error } = await supabase.from("workchain_otps").insert({
         contract_id: cId,
         code,
         expires_at: expiresAt,
@@ -51,56 +52,88 @@ export async function POST(req: NextRequest) {
       });
       if (error) throw new Error(error.message);
 
-      return NextResponse.json({ code, expiresInSeconds: 180 });
+      return NextResponse.json({
+        success: true,
+        code,
+        otpCode: code,
+        expiresAt,
+      });
     }
 
-    // 2. 근로자: OTP 1회용 검증 및 240분 누적
+    // 2. 근로자: 출근 / 퇴근 OTP 1회용 검증 및 실제 근무 시간 자동 계산
     if (action === "verify_otp") {
-      const { data: record, error: fetchErr } = await supabase
+      const inputCode = String(body.code ?? body.otpCode ?? "").trim();
+      if (!inputCode) {
+        return NextResponse.json({ error: "OTP 번호를 입력하세요." }, { status: 400 });
+      }
+
+      const { data: otpRow, error: otpErr } = await supabase
         .from("workchain_otps")
         .select("*")
         .eq("contract_id", cId)
+        .eq("code", inputCode)
+        .eq("used", false)
+        .gt("expires_at", new Date().toISOString())
+        .order("created_at", { ascending: false })
+        .limit(1)
         .maybeSingle();
 
-      if (fetchErr) throw new Error(fetchErr.message);
-      if (!record) {
-        return NextResponse.json({ error: "발급된 OTP가 없습니다." }, { status: 400 });
-      }
-      if (record.used) {
-        return NextResponse.json({ error: "이미 사용된 OTP입니다. 새 번호를 발급받으세요." }, { status: 400 });
-      }
-      if (Date.now() > Number(record.expires_at)) {
-        return NextResponse.json({ error: "OTP 유효시간(3분)이 만료되었습니다." }, { status: 400 });
-      }
-      if (record.code !== String(otpCode).trim()) {
-        return NextResponse.json({ error: "인증번호 6자리가 일치하지 않습니다." }, { status: 400 });
+      if (otpErr || !otpRow) {
+        return NextResponse.json(
+          { error: "유효하지 않거나 이미 사용/만료된 OTP입니다." },
+          { status: 400 }
+        );
       }
 
-      // 1회 사용 즉시 폐기
-      const { error: updateErr } = await supabase
+      // 재사용 차단 (출근용 OTP를 퇴근에 재사용 불가)
+      const { error: usedErr } = await supabase
         .from("workchain_otps")
         .update({ used: true })
-        .eq("contract_id", cId);
-      if (updateErr) throw new Error(updateErr.message);
+        .eq("id", otpRow.id);
+      if (usedErr) throw new Error(usedErr.message);
 
-      // 기존 누적 분 조회 후 +240분 저장
       const { data: logData } = await supabase
         .from("workchain_logs")
-        .select("total_minutes")
+        .select("total_minutes, active_check_in_at")
         .eq("contract_id", cId)
         .maybeSingle();
 
-      const updatedMinutes = (logData?.total_minutes || 0) + 240;
+      const now = new Date();
 
-      const { error: upsertErr } = await supabase.from("workchain_logs").upsert({
+      // A) 출근 기록이 없으면 -> 출근(Check-In) 처리
+      if (!logData?.active_check_in_at) {
+        const { error: checkInErr } = await supabase.from("workchain_logs").upsert({
+          contract_id: cId,
+          total_minutes: Number(logData?.total_minutes || 0),
+          active_check_in_at: now.toISOString(),
+        });
+        if (checkInErr) throw new Error(checkInErr.message);
+
+        return NextResponse.json({
+          success: true,
+          status: "checked_in",
+          checkInAt: now.toISOString(),
+          addedMinutes: 0,
+          totalMinutes: Number(logData?.total_minutes || 0),
+        });
+      }
+
+      // B) 이미 출근 중이면 -> 퇴근(Check-Out) 처리 및 경과 시간(분) 누적
+      const checkInTime = new Date(logData.active_check_in_at).getTime();
+      const diffMinutes = Math.max(1, Math.round((now.getTime() - checkInTime) / 60000));
+      const updatedMinutes = Number(logData.total_minutes || 0) + diffMinutes;
+
+      const { error: checkOutErr } = await supabase.from("workchain_logs").upsert({
         contract_id: cId,
         total_minutes: updatedMinutes,
+        active_check_in_at: null,
       });
-      if (upsertErr) throw new Error(upsertErr.message);
+      if (checkOutErr) throw new Error(checkOutErr.message);
 
       return NextResponse.json({
         success: true,
-        addedMinutes: 240,
+        status: "checked_out",
+        addedMinutes: diffMinutes,
         totalMinutes: updatedMinutes,
       });
     }
@@ -114,9 +147,16 @@ export async function POST(req: NextRequest) {
 
       const { data: logData } = await supabase
         .from("workchain_logs")
-        .select("total_minutes")
+        .select("total_minutes, active_check_in_at")
         .eq("contract_id", cId)
         .maybeSingle();
+
+      if (logData?.active_check_in_at) {
+        return NextResponse.json(
+          { error: "현재 근무 중입니다. 퇴근 OTP 인증을 먼저 완료해 주세요." },
+          { status: 400 }
+        );
+      }
 
       const totalMinutes = logData?.total_minutes || 0;
       const payloadHash = ethers.solidityPackedKeccak256(

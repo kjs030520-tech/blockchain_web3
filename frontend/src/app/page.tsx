@@ -65,6 +65,7 @@ export default function WorkChainHome() {
   const [hourlyWage, setHourlyWage] = useState("10030");
   const [expectedHours, setExpectedHours] = useState("16");
   const [generatedOtp, setGeneratedOtp] = useState<string | null>(null);
+  const [activeCheckInAt, setActiveCheckInAt] = useState<string | null>(null);
   const [contractIdInput, setContractIdInput] = useState("1");
   const [pdfFileName, setPdfFileName] = useState("");
   const [isVerifyingPdf, setIsVerifyingPdf] = useState(false);
@@ -171,6 +172,7 @@ export default function WorkChainHome() {
       const logData = logRes.ok ? await logRes.json() : { totalMinutes: 0 };
       const currentOffchain = Number(logData.totalMinutes || 0);
       setOffchainMinutes(currentOffchain);
+      setActiveCheckInAt(logData.activeCheckInAt || null);
 
       if (typeof window === "undefined" || !(window as any).ethereum) return;
       const provider = currentProvider || new ethers.BrowserProvider((window as any).ethereum);
@@ -312,49 +314,70 @@ export default function WorkChainHome() {
 
   // 2. 고용주: 6자리 OTP 출퇴근 번호 발급
   // 2. 고용주: 서버에서 1회용 6자리 OTP 발급
-  const handleGenerateOtp = async () => {
-    try {
-      const res = await fetch("/api/work-logs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "generate_otp", contractId: contractIdInput }),
-      });
-      const data = await res.json();
-      setGeneratedOtp(data.code);
-      setStatusMsg(`✓ 1회용 인증번호 [${data.code}] 생성됨 (사용 즉시 폐기)`);
-    } catch (err: any) {
-      alert("OTP 발급 실패: " + err.message);
-    }
-  };
+  // 2. 고용주: 서버에서 1회용 6자리 OTP 발급 (출근/퇴근 공용)
+const handleGenerateOtp = async () => {
+  try {
+    const res = await fetch("/api/work-logs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "issue_otp",
+        contractId: contractIdInput,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) return alert(data.error || "OTP 발급 실패");
+
+    setGeneratedOtp(data.code);
+    setStatusMsg(`✓ 매장용 1회용 6자리 OTP [${data.code}] 생성됨 (3분 유효)`);
+  } catch (err: any) {
+    alert("OTP 발급 오류: " + err.message);
+  }
+};
 
   // 3. 근로자: 오프체인 1회용 OTP 인증 (가스비 0원)
   const handleVerifyOtp = async () => {
-    if (!inputOtp || inputOtp.length !== 6) return alert("6자리 번호를 정확히 입력하세요.");
-    setLoading(true);
-    try {
-      const res = await fetch("/api/work-logs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "verify_otp",
-          contractId: contractIdInput,
-          otpCode: inputOtp,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+  if (!account) return alert("지갑을 연결하세요.");
+  if (!inputOtp || inputOtp.length !== 6) return alert("6자리 번호를 정확히 입력하세요.");
 
-      setOffchainMinutes(data.totalMinutes);
-      setInputOtp("");
-      setStatusMsg(`✓ 출퇴근 인증 완료! (가스비 0원 · 누적 ${data.totalMinutes}분)`);
-      fetchContractDetails(contractIdInput);
-    } catch (err: any) {
-      alert(err.message);
-      setStatusMsg("인증 실패: " + err.message);
-    } finally {
-      setLoading(false);
+  setLoading(true);
+  setStatusMsg("OTP 인증 확인 중...");
+  try {
+    const res = await fetch("/api/work-logs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "verify_otp",
+        contractId: contractIdInput,
+        otpCode: inputOtp,
+      }),
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || "OTP 인증에 실패했습니다.");
     }
-  };
+
+    // 👇 바로 이 자리 (서버에서 data를 받아온 뒤!)
+    if (data.status === "checked_in") {
+      setStatusMsg(
+        `✓ 출근 인증 완료! (${new Date(data.checkInAt).toLocaleTimeString("ko-KR")} 시작 · 퇴근 시 새 OTP를 입력하세요)`
+      );
+    } else {
+      setStatusMsg(
+        `✓ 퇴근 인증 완료! (+${data.addedMinutes}분 자동 계산 누적, 총 ${data.totalMinutes}분)`
+      );
+    }
+
+    setInputOtp("");
+    await fetchContractDetails(contractIdInput);
+  } catch (err: any) {
+    alert("출퇴근 기록 실패: " + err.message);
+    setStatusMsg("인증 실패: " + err.message);
+  } finally {
+    setLoading(false);
+  }
+};
 
   // 4. 최종 급여 일괄 정산 (서버 서명 발급 -> 온체인 1회 실행)
   const handleSettleWage = async () => {
