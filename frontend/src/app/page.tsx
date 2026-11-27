@@ -349,7 +349,7 @@ const handleDemoRewind = async () => {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "시연 시간 설정 실패");
 
-    setStatusMsg("🧪 [시연용] 출근 시각을 15시간 전으로 설정했습니다. 이제 퇴근 OTP를 입력하세요!");
+    setStatusMsg("🧪 [시연용] 출근 시각을 16시간 전으로 설정했습니다. 이제 퇴근 OTP를 입력하세요!");
     await fetchContractDetails(contractIdInput);
   } catch (err: any) {
     alert(err.message);
