@@ -42,7 +42,7 @@ export async function POST(req: NextRequest) {
     // 1. 고용주: 1회용 6자리 OTP 발급 (유효시간 3분)
     if (action === "issue_otp") {
       const code = Math.floor(100000 + Math.random() * 900000).toString();
-      const expiresAt = new Date(Date.now() + 180 * 1000).toISOString();
+      const expiresAt = Date.now() + 180 * 1000;
 
       const { error } = await supabase.from("workchain_otps").insert({
         contract_id: cId,
@@ -73,7 +73,7 @@ export async function POST(req: NextRequest) {
         .eq("contract_id", cId)
         .eq("code", inputCode)
         .eq("used", false)
-        .gt("expires_at", new Date().toISOString())
+        .gt("expires_at", Date.now())
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
