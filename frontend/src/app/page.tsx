@@ -775,44 +775,72 @@ const handleGenerateOtp = async () => {
             <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2 mb-2">
               <Clock className="text-blue-600" /> 현장 6자리 OTP 출퇴근 체크인
             </h2>
-            <p className="text-xs text-slate-500 mb-4">매장 포스기나 사장님 화면에 뜬 6자리 번호를 입력하세요.</p>
-            <div className="space-y-3">
-              <div>
-                <label className="block text-xs text-slate-500 mb-1">참여 중인 계약 ID</label>
-                <input
-                  type="number"
-                  value={contractIdInput}
-                  onChange={(e) => setContractIdInput(e.target.value)}
-                  className="w-full p-2.5 border rounded-lg text-sm font-bold"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-slate-500 mb-1">인증번호 6자리</label>
-                <input
-                  type="text"
-                  maxLength={6}
-                  placeholder="예: 482910"
-                  value={inputOtp}
-                  onChange={(e) => setInputOtp(e.target.value)}
-                  className="w-full p-3 border rounded-lg text-center font-mono text-2xl tracking-widest font-black"
-                />
-              </div>
-              <button
-                onClick={handleVerifyOtp}
-                disabled={loading}
-                className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg shadow text-sm transition"
-              >
-                출근/근무 확인 인증 (4시간 누적)
-              </button>
-              <button
-                onClick={handleSettleWage}
-                disabled={loading}
-                className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg shadow text-sm transition"
-              >
-                💰 급여 직접 정산 청구 (고용주 미정산 시)
-              </button>
-            </div>
-          </div>
+            <p className="text-xs text-slate-500 mb-4">
+                출근 시 1회, 퇴근 시 새 OTP로 1회 인증하면 실제 근무 시간이 자동 누적됩니다.
+            </p>
+
+  {/* 👇 현재 출근/퇴근 상태 배지 추가 */}
+  <div
+    className={`mb-4 p-3 rounded-lg text-xs font-semibold border ${
+      activeCheckInAt
+        ? "bg-emerald-50 text-emerald-800 border-emerald-200"
+        : "bg-slate-50 text-slate-600 border-slate-200"
+    }`}
+  >
+    {activeCheckInAt
+      ? `🟢 현재 근무 중 (출근 시각: ${new Date(activeCheckInAt).toLocaleTimeString("ko-KR")})`
+      : "⚪ 출근 대기 중 (사장님께 출근 OTP를 받아 입력하세요)"}
+  </div>
+
+  <div className="space-y-3">
+    <div>
+      <label className="block text-xs text-slate-500 mb-1">참여 중인 계약 ID</label>
+      <input
+        type="number"
+        value={contractIdInput}
+        onChange={(e) => setContractIdInput(e.target.value)}
+        className="w-full p-2.5 border rounded-lg text-sm font-bold"
+      />
+    </div>
+    <div>
+      <label className="block text-xs text-slate-500 mb-1">인증번호 6자리</label>
+      <input
+        type="text"
+        maxLength={6}
+        placeholder="예: 482910"
+        value={inputOtp}
+        onChange={(e) => setInputOtp(e.target.value)}
+        className="w-full p-3 border rounded-lg text-center font-mono text-2xl tracking-widest font-black"
+      />
+    </div>
+
+    {/* 👇 상태에 따라 바뀌는 출근/퇴근 버튼 */}
+    <button
+      onClick={handleVerifyOtp}
+      disabled={loading}
+      className={`w-full py-3 font-bold rounded-lg shadow text-sm transition text-white ${
+        activeCheckInAt
+          ? "bg-indigo-600 hover:bg-indigo-700"
+          : "bg-blue-600 hover:bg-blue-700"
+      }`}
+    >
+      {loading
+        ? "처리 중..."
+        : activeCheckInAt
+        ? "퇴근 OTP 인증 및 근무시간 자동 기록"
+        : "출근 OTP 인증 시작"}
+    </button>
+
+    <button
+      onClick={handleSettleWage}
+      disabled={loading}
+      className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg shadow text-sm transition"
+    >
+      💰 급여 직접 정산 청구 (고용주 미정산 시)
+    </button>
+  </div>
+</div>
+
 
           {/* 온체인 경력 이력서 조회 카드 */}
           <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
