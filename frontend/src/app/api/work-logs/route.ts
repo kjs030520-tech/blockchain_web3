@@ -171,6 +171,28 @@ export async function POST(req: NextRequest) {
         signature,
       });
     }
+    // 4. [시연 전용] 출근 시각을 15시간 전으로 설정 (퇴근 OTP 시 900분 자동 계산 테스트용)
+    if (action === "demo_rewind_checkin") {
+      const { data: logData } = await supabase
+        .from("workchain_logs")
+        .select("total_minutes")
+        .eq("contract_id", cId)
+        .maybeSingle();
+
+      const fifteenHoursAgo = new Date(Date.now() - 15 * 60 * 60 * 1000).toISOString();
+
+      const { error } = await supabase.from("workchain_logs").upsert({
+        contract_id: cId,
+        total_minutes: Number(logData?.total_minutes || 0),
+        active_check_in_at: fifteenHoursAgo,
+      });
+      if (error) throw new Error(error.message);
+
+      return NextResponse.json({
+        success: true,
+        checkInAt: fifteenHoursAgo,
+      });
+    }
 
     return NextResponse.json({ error: "잘못된 요청입니다." }, { status: 400 });
   } catch (err: any) {

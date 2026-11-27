@@ -334,6 +334,29 @@ const handleGenerateOtp = async () => {
     alert("OTP 발급 오류: " + err.message);
   }
 };
+//시연용 버튼 추가
+const handleDemoRewind = async () => {
+  setLoading(true);
+  try {
+    const res = await fetch("/api/work-logs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "demo_rewind_checkin",
+        contractId: contractIdInput,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "시연 시간 설정 실패");
+
+    setStatusMsg("🧪 [시연용] 출근 시각을 15시간 전으로 설정했습니다. 이제 퇴근 OTP를 입력하세요!");
+    await fetchContractDetails(contractIdInput);
+  } catch (err: any) {
+    alert(err.message);
+  } finally {
+    setLoading(false);
+  }
+};
 
   // 3. 근로자: 오프체인 1회용 OTP 인증 (가스비 0원)
   const handleVerifyOtp = async () => {
@@ -837,6 +860,13 @@ const handleGenerateOtp = async () => {
       className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg shadow text-sm transition"
     >
       💰 급여 직접 정산 청구 (고용주 미정산 시)
+    </button>
+    <button
+      onClick={handleDemoRewind}
+      disabled={loading}
+      className="w-full py-2 border border-dashed border-amber-400 bg-amber-50 hover:bg-amber-100 text-amber-800 font-semibold rounded-lg text-xs transition"
+    >
+      🧪 [시연용] 15시간 전 출근으로 시간 경과 적용
     </button>
   </div>
 </div>
