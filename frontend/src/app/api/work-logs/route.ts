@@ -179,7 +179,7 @@ export async function POST(req: NextRequest) {
         .eq("contract_id", cId)
         .maybeSingle();
 
-      const fifteenHoursAgo = new Date(Date.now() - 15 * 60 * 60 * 1000).toISOString();
+      const fifteenHoursAgo = new Date(Date.now() - 16 * 60 * 60 * 1000).toISOString();
 
       const { error } = await supabase.from("workchain_logs").upsert({
         contract_id: cId,

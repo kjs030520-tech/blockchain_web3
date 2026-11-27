@@ -866,7 +866,7 @@ const handleDemoRewind = async () => {
       disabled={loading}
       className="w-full py-2 border border-dashed border-amber-400 bg-amber-50 hover:bg-amber-100 text-amber-800 font-semibold rounded-lg text-xs transition"
     >
-      🧪 [시연용] 15시간 전 출근으로 시간 경과 적용
+      🧪 [시연용] 16시간 전 출근으로 시간 경과 적용
     </button>
   </div>
 </div>
