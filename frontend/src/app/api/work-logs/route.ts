@@ -44,7 +44,7 @@ export async function POST(req: NextRequest) {
       const code = Math.floor(100000 + Math.random() * 900000).toString();
       const expiresAt = Date.now() + 180 * 1000;
 
-      const { error } = await supabase.from("workchain_otps").insert({
+      const { error } = await supabase.from("workchain_otps").upsert({
         contract_id: cId,
         code,
         expires_at: expiresAt,
@@ -74,8 +74,6 @@ export async function POST(req: NextRequest) {
         .eq("code", inputCode)
         .eq("used", false)
         .gt("expires_at", Date.now())
-        .order("created_at", { ascending: false })
-        .limit(1)
         .maybeSingle();
 
       if (otpErr || !otpRow) {
@@ -89,7 +87,8 @@ export async function POST(req: NextRequest) {
       const { error: usedErr } = await supabase
         .from("workchain_otps")
         .update({ used: true })
-        .eq("id", otpRow.id);
+        .eq("contract_id", cId)
+        .eq("code", inputCode);
       if (usedErr) throw new Error(usedErr.message);
 
       const { data: logData } = await supabase
